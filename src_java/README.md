@@ -33,12 +33,15 @@ This was checked by reading the Cosmos Java SDK 4.68.0 bulk executor bytecode, n
   several batches in flight. Throughput control still caps aggregate RU, so this cannot cause a 429 storm.
 
 **Honest caveat about the .NET baseline:** the .NET app (`src_dotnet/`) already sets
-`AllowBulkExecution = true`, so it is *not* missing bulk batching. Its real weaknesses are (a) no RU
-governor (it oscillates between partition starvation and 429 throttling) and (b) a single
-client/process by default. The defensible differentiators of this Java version are therefore
-**throughput control** (smooth pacing + fair cross-client sharing) and **explicit per-partition
-micro-batch depth**, not "bulk vs. no-bulk." Absolute throughput numbers still require a run against a
-real Cosmos account; the local vnext emulator surfaces an unrelated HTTP/2 transport quirk (see Notes).
+`AllowBulkExecution = true`, so it is *not* missing bulk batching. What it *is* missing — confirmed by
+grepping the source: no `ThroughputControlGroupConfig` / `enableLocalThroughputControlGroup` /
+`enableGlobalThroughputControlGroup` anywhere in `src_dotnet/` (the only matches are inside the
+compiled SDK DLL) — is **throughput control**. The Python app (`src/`) lacks it too. Without an RU
+governor the app runs open-loop: it either under-drives the container (starvation) or overshoots into
+429s and burns time on rate-limit retry backoff, so effective throughput collapses and a bigger VM
+doesn't help. **Throughput control is the primary fix.** The explicit per-partition micro-batch depth
+bump above is a useful secondary optimization. Absolute throughput numbers still require a run against
+a real Cosmos account; the local vnext emulator surfaces an unrelated HTTP/2 transport quirk (see Notes).
 
 ## What throughput control actually does in the Java SDK
 
