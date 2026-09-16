@@ -60,7 +60,10 @@ public final class BenchmarkConfig {
         this.partitionKeyField = get(c, "COSMOS_PARTITION_KEY_FIELD", "docid");
 
         this.bulkFlushMicroBatch = intVal(c, "BULK_SIZE", 100);
-        this.maxMicroBatchConcurrency = intVal(c, "MAX_MICRO_BATCH_CONCURRENCY", 8);
+        // SDK constraint: maxMicroBatchConcurrency must be within [1, 5]. Default to the max (5) to
+        // give each physical partition the deepest supported in-flight batching, then clamp any
+        // user-supplied value into the valid range so the app never throws at runtime.
+        this.maxMicroBatchConcurrency = clamp(intVal(c, "MAX_MICRO_BATCH_CONCURRENCY", 5), 1, 5);
         this.maxMicroBatchSize = Math.min(intVal(c, "MAX_MICRO_BATCH_SIZE", 100), 100);
         this.useGatewayMode = boolVal(c, "USE_GATEWAY_MODE", false);
         this.preferredRegion = get(c, "COSMOS_PREFERRED_REGION", "");
@@ -110,6 +113,10 @@ public final class BenchmarkConfig {
         return new BenchmarkConfig(merged);
     }
 
+    private static int clamp(int v, int lo, int hi) {
+        return Math.max(lo, Math.min(hi, v));
+    }
+
     private static String req(Map<String, String> c, String k) {
         String v = c.get(k);
         if (v == null || v.isBlank()) throw new IllegalArgumentException("Missing required config: " + k);
@@ -124,8 +131,7 @@ public final class BenchmarkConfig {
         try { return (v == null || v.isBlank()) ? d : Integer.parseInt(v.trim()); }
         catch (NumberFormatException e) { return d; }
     }
-    private static boolean boolVal(Map<String, String> c, String k, boolean d) {
-        String v = c.get(k);
+    private static boolean boolVal(Map<String, String> c, String k, boolean d) {        String v = c.get(k);
         if (v == null || v.isBlank()) return d;
         String t = v.trim().toLowerCase();
         return t.equals("1") || t.equals("true") || t.equals("yes") || t.equals("on");

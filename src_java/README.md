@@ -29,7 +29,8 @@ This was checked by reading the Cosmos Java SDK 4.68.0 bulk executor bytecode, n
 - **Per-partition micro-batch concurrency defaults to 1** (`Configs.DEFAULT_MAX_BULK_MICRO_BATCH_CONCURRENCY = 1`),
   with `maxMicroBatchSize = 100`. On a container with few physical partitions this per-partition depth
   of 1 can under-drive a high-RU container. This benchmark therefore **explicitly raises**
-  `maxMicroBatchConcurrency` (default 8 here, via `MAX_MICRO_BATCH_CONCURRENCY`) so each partition keeps
+  `maxMicroBatchConcurrency` to the SDK maximum (the SDK enforces a valid range of **[1, 5]**; default
+  here is 5, tunable via `MAX_MICRO_BATCH_CONCURRENCY` and clamped into range) so each partition keeps
   several batches in flight. Throughput control still caps aggregate RU, so this cannot cause a 429 storm.
 
 **Honest caveat about the .NET baseline:** the .NET app (`src_dotnet/`) already sets
@@ -119,7 +120,7 @@ Reads a `.env` file (path via first CLI arg, default `../.env`) plus process env
 | `PAYLOAD_BYTES` | `1000` | Filler size of the `text` field |
 | `COSMOS_PARTITION_KEY_FIELD` | `docid` | Partition key field (path `/docid`) |
 | `BULK_SIZE` | `100` | Micro-batch target hint (analogue of the other ports' `BULK_SIZE`) |
-| `MAX_MICRO_BATCH_CONCURRENCY` | `8` | Per-partition in-flight batches (SDK default is 1) |
+| `MAX_MICRO_BATCH_CONCURRENCY` | `5` | Per-partition in-flight batches (SDK default 1, valid range [1,5]) |
 | `MAX_MICRO_BATCH_SIZE` | `100` | Ops per micro-batch (SDK direct-mode cap is 100) |
 | `USE_GATEWAY_MODE` | `false` | Gateway vs. direct transport |
 | `COSMOS_PREFERRED_REGION` | *(empty)* | Optional preferred region |
@@ -146,6 +147,22 @@ java -jar target/cosmos-vector-bench-java.jar ../.env
 ```
 
 The build produces a shaded (fat) jar with `com.azure.cosmos.bench.Benchmark` as the main class.
+
+## Offline validation
+
+Because a reachable Cosmos account (or working emulator) may not be available in every environment,
+an offline validation harness exercises the configuration, throughput-control-group construction, and
+bulk-option tuning code paths and asserts the resulting values — no network required:
+
+```bash
+java -cp target/cosmos-vector-bench-java.jar com.azure.cosmos.bench.ValidationMain
+```
+
+It verifies, among other things, that per-partition micro-batch concurrency is set within the SDK's
+enforced `[1, 5]` range (out-of-range values are clamped, so the app never throws at runtime), that an
+absolute RU target correctly overrides the percentage threshold (serverless path), and that both
+threshold and absolute-RU throughput-control groups build successfully. Exit code is non-zero if any
+check fails.
 
 ## Notes
 
