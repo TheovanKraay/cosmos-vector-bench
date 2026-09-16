@@ -31,6 +31,8 @@ public final class BenchmarkConfig {
 
     // Ingest / bulk
     public final int bulkFlushMicroBatch; // maps to Cosmos bulk micro-batch target (BULK_SIZE analogue)
+    public final int maxMicroBatchConcurrency; // per-partition in-flight batches (SDK default 1)
+    public final int maxMicroBatchSize;        // ops per micro-batch (SDK cap 100 in direct mode)
     public final boolean useGatewayMode;  // needed for the HTTP-only emulator; DIRECT for production
     public final String preferredRegion;  // optional, empty => none
 
@@ -58,6 +60,8 @@ public final class BenchmarkConfig {
         this.partitionKeyField = get(c, "COSMOS_PARTITION_KEY_FIELD", "docid");
 
         this.bulkFlushMicroBatch = intVal(c, "BULK_SIZE", 100);
+        this.maxMicroBatchConcurrency = intVal(c, "MAX_MICRO_BATCH_CONCURRENCY", 8);
+        this.maxMicroBatchSize = Math.min(intVal(c, "MAX_MICRO_BATCH_SIZE", 100), 100);
         this.useGatewayMode = boolVal(c, "USE_GATEWAY_MODE", false);
         this.preferredRegion = get(c, "COSMOS_PREFERRED_REGION", "");
 

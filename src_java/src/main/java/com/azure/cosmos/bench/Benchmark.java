@@ -60,6 +60,8 @@ public final class Benchmark {
                 "Throughput control: enabled=%s group=%s global=%s threshold=%s targetRU=%s%n",
                 cfg.throughputControlEnabled, cfg.throughputControlGroup, cfg.globalControl,
                 cfg.targetThroughputThreshold, cfg.targetThroughput);
+        System.out.printf("Bulk tuning: maxMicroBatchConcurrency=%d maxMicroBatchSize=%d%n",
+                cfg.maxMicroBatchConcurrency, cfg.maxMicroBatchSize);
 
         CosmosAsyncClient client = buildClient(cfg);
         try {
@@ -142,6 +144,14 @@ public final class Benchmark {
         if (cfg.throughputControlEnabled && groupConfig != null) {
             options.setThroughputControlGroupName(cfg.throughputControlGroup);
         }
+        // The bulk executor groups operations by physical partition (partition-key-range) and runs
+        // each group concurrently. However, the SDK default for *per-partition* micro-batch
+        // concurrency is 1 (Configs.DEFAULT_MAX_BULK_MICRO_BATCH_CONCURRENCY), which can under-drive a
+        // high-RU container that has few physical partitions. Raise it so each partition keeps several
+        // batches in flight. Throughput control still caps aggregate RU, so this cannot cause a 429
+        // storm -- it only removes the artificial per-partition depth ceiling.
+        options.setMaxMicroBatchConcurrency(cfg.maxMicroBatchConcurrency);
+        options.setMaxMicroBatchSize(cfg.maxMicroBatchSize);
 
         // Stream operations lazily so we never materialise all docs in memory. The bulk executor
         // groups these into RU-aware micro-batches per physical partition automatically.

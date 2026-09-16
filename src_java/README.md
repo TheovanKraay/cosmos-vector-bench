@@ -19,6 +19,27 @@ The single async-loop-per-worker design used by the Python/.NET apps has *neithe
 partition-aware batching layer *nor* an RU governor, which is exactly why extra CPU sits idle: the
 bottleneck is not CPU, it's how requests are dispatched and paced.
 
+## Validation: does this actually fix the .NET saturation problem?
+
+This was checked by reading the Cosmos Java SDK 4.68.0 bulk executor bytecode, not assumed:
+
+- **Cross-partition fan-out is automatic.** `BulkExecutor` keys a `ConcurrentMap<partitionKeyRangeId,
+  PartitionScopeThresholds>` and runs each partition group concurrently, so writes spread across
+  physical partitions without app-side orchestration.
+- **Per-partition micro-batch concurrency defaults to 1** (`Configs.DEFAULT_MAX_BULK_MICRO_BATCH_CONCURRENCY = 1`),
+  with `maxMicroBatchSize = 100`. On a container with few physical partitions this per-partition depth
+  of 1 can under-drive a high-RU container. This benchmark therefore **explicitly raises**
+  `maxMicroBatchConcurrency` (default 8 here, via `MAX_MICRO_BATCH_CONCURRENCY`) so each partition keeps
+  several batches in flight. Throughput control still caps aggregate RU, so this cannot cause a 429 storm.
+
+**Honest caveat about the .NET baseline:** the .NET app (`src_dotnet/`) already sets
+`AllowBulkExecution = true`, so it is *not* missing bulk batching. Its real weaknesses are (a) no RU
+governor (it oscillates between partition starvation and 429 throttling) and (b) a single
+client/process by default. The defensible differentiators of this Java version are therefore
+**throughput control** (smooth pacing + fair cross-client sharing) and **explicit per-partition
+micro-batch depth**, not "bulk vs. no-bulk." Absolute throughput numbers still require a run against a
+real Cosmos account; the local vnext emulator surfaces an unrelated HTTP/2 transport quirk (see Notes).
+
 ## What throughput control actually does in the Java SDK
 
 There are two distinct mechanisms, and it's worth being precise about which does what.
@@ -95,6 +116,8 @@ Reads a `.env` file (path via first CLI arg, default `../.env`) plus process env
 | `PAYLOAD_BYTES` | `1000` | Filler size of the `text` field |
 | `COSMOS_PARTITION_KEY_FIELD` | `docid` | Partition key field (path `/docid`) |
 | `BULK_SIZE` | `100` | Micro-batch target hint (analogue of the other ports' `BULK_SIZE`) |
+| `MAX_MICRO_BATCH_CONCURRENCY` | `8` | Per-partition in-flight batches (SDK default is 1) |
+| `MAX_MICRO_BATCH_SIZE` | `100` | Ops per micro-batch (SDK direct-mode cap is 100) |
 | `USE_GATEWAY_MODE` | `false` | Gateway vs. direct transport |
 | `COSMOS_PREFERRED_REGION` | *(empty)* | Optional preferred region |
 | `THROUGHPUT_CONTROL_ENABLED` | `true` | Enable throughput control |
