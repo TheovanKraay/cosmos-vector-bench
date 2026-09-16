@@ -1,15 +1,15 @@
-# Cosmos DB Vector Bulk Ingest — Spark Connector edition (`src_spark/`)
+# Cosmos DB Vector Bulk Ingest: Spark Connector edition (`src_spark/`)
 
 A third alternative implementation of this repo's write benchmark, alongside the reference
 **Python** (`src/`, `main.py`) and the **.NET** port (`src_dotnet/`). Instead of driving the Cosmos
 bulk SDK from a single process, it uses the **Azure Cosmos DB Spark 3 connector** in **bulk mode**
-with the **throughput control** feature — a Databricks/Spark notebook that reproduces the same write
+with the **throughput control** feature: a Databricks/Spark notebook that reproduces the same write
 workload but scales ingestion horizontally across a cluster.
 
 ## Why this exists
 
 The upstream benchmark drives the Cosmos **.NET/Python bulk SDK from a single process**. That
-makes the *client* the bottleneck — one machine's CPU, NIC, and thread scheduling cap out long
+makes the *client* the bottleneck; one machine's CPU, NIC, and thread scheduling cap out long
 before a high-RU container is saturated. Customers with large RU budgets struggle to actually
 consume them.
 
@@ -44,12 +44,12 @@ emb    : array<float>    -- FAKE_DATA_VECTOR_DIM floats in [-1, 1] (default 1536
 ```
 
 Flow:
-1. **Config** — endpoint/key/db/container + workload knobs mirroring the benchmark's `.env`
+1. **Config**: endpoint/key/db/container + workload knobs mirroring the benchmark's `.env`
    (`TOTAL_DOCS`, `FAKE_DATA_VECTOR_DIM`, `PAYLOAD_BYTES`, partition key path).
 2. **(Optional) create container** via the connector catalog API, with a **vector embedding policy**
    and **quantizedFlat vector index** on `/emb` (matching the benchmark's Bicep), plus a high
    autoscale RU ceiling to have throughput to saturate.
-3. **Distributed generation** — `spark.range(...).mapPartitions` builds documents on the executors
+3. **Distributed generation**: `spark.range(...).mapPartitions` builds documents on the executors
    (the heavy 1536-dim vector payload is never materialised on the driver).
 4. **Bulk write** with `cosmos.oltp` + bulk enabled + throughput control at `0.95` of provisioned RU.
 5. **Read-back count** to verify.
@@ -82,17 +82,17 @@ lower it if the container is shared. You can instead set an absolute
 Verified locally on the Cosmos DB **vnext** emulator + Apache **Spark 3.5.3** with connector
 `4.49.2`:
 
-1. **Data-generation logic** (`gen_test.scala`) — PASSED. Confirmed:
+1. **Data-generation logic** (`gen_test.scala`): PASSED. Confirmed:
    - 500 docs across the requested 4 Spark partitions,
    - vector length == configured dim, values within `[-1, 1]`,
    - exact field set `id,docid,title,text,emb`.
    This exercises the same schema + `mapPartitions` generation the notebook uses.
 
-2. **Emulator data plane** (`emu_rest_test.py`) — PASSED. Inserted 5 benchmark-shaped documents
+2. **Emulator data plane** (`emu_rest_test.py`): PASSED. Inserted 5 benchmark-shaped documents
    into a `/docid`-partitioned container and confirmed `SELECT VALUE COUNT(1)` returns 5, proving
    the doc shape / partition key are accepted by Cosmos.
 
-3. **Connector compile + execute** — the notebook's Scala compiled and executed in `spark-shell`
+3. **Connector compile + execute**: the notebook's Scala compiled and executed in `spark-shell`
    with the connector on the classpath (DataFrame built, bulk write invoked).
 
 ### Emulator caveat (why the connector smoke test can't fully round-trip here)
@@ -100,7 +100,7 @@ Verified locally on the Cosmos DB **vnext** emulator + Apache **Spark 3.5.3** wi
 The Cosmos DB **vnext** emulator's gateway negotiates **HTTP/2**, while the Java Cosmos SDK bundled
 in the current Spark connector uses an **HTTP/1.1** gateway client. The gateway answers the SDK's
 metadata request with `HTTP/1.1 400 Bad Request`, which surfaces as a `NotSslRecordException` /
-`503 (10001)` in the connector. This is a **vnext-emulator ↔ SDK compatibility limitation**, not a
+`503 (10001)` in the connector. This is a **vnext-emulator vs. SDK compatibility limitation**, not a
 defect in the notebook.
 
 The notebook targets **real Azure Cosmos DB** (and the classic HTTPS emulator), both of which the
@@ -110,12 +110,12 @@ point `local_test.scala` at a real Cosmos account.
 
 ## Tuning to saturate a high-RU container
 
-- **Scale executors, not just cores** — bulk throughput scales with total executor cores; add
+- **Scale executors, not just cores**: bulk throughput scales with total executor cores; add
   workers before touching internals.
 - **`numInputPartitions`** ≈ a small multiple of total cores so every core writes.
 - **`targetThroughputThreshold`** is the RU dial; raise toward `1.0` to saturate.
 - **Co-locate** the Spark cluster in the Cosmos account's region and set
   `spark.cosmos.preferredRegionsList`.
-- **Partition spread** — `docid` is a GUID, so writes fan out evenly (ideal). A hot/low-cardinality
+- **Partition spread**: `docid` is a GUID, so writes fan out evenly (ideal). A hot/low-cardinality
   key would bottleneck regardless of RU.
 - For much larger docs, raise `spark.cosmos.write.bulk.targetedPayloadSizeInBytes` toward ~1.5 MB.

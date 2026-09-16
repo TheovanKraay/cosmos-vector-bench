@@ -1,8 +1,8 @@
-# Cosmos DB Vector Write Benchmark — Java (throughput control)
+# Cosmos DB Vector Write Benchmark: Java (throughput control)
 
 A Java port of the .NET benchmark (`src_dotnet/`) that writes synthetic vector documents to
-Azure Cosmos DB. Unlike the Python (`src/`) and .NET (`src_dotnet/`) implementations — which issue
-individual `createItem` calls governed only by manual concurrency knobs — this version uses the
+Azure Cosmos DB. Unlike the Python (`src/`) and .NET (`src_dotnet/`) implementations, which issue
+individual `createItem` calls governed only by manual concurrency knobs, this version uses the
 **Cosmos Java SDK bulk API** together with the SDK's **throughput control** feature.
 
 It exists to answer a specific question: *why does a large VM (e.g. 96 cores) fail to saturate a
@@ -10,8 +10,8 @@ high-RU Cosmos container, and how do you fix it?*
 
 ## TL;DR
 
-- **Bulk executor** (`executeBulkOperations`) → parallelism across physical partitions. This is what
-  actually saturates a container uniformly.
+- **Bulk executor** (`executeBulkOperations`) gives parallelism across physical partitions. This is
+  what actually saturates a container uniformly.
 - **Throughput control** → paces aggregate RU consumption just under the container's ceiling (avoiding
   mass 429s) and, in global mode, fairly shares one RU budget across multiple cooperating clients.
 
@@ -34,10 +34,10 @@ This was checked by reading the Cosmos Java SDK 4.68.0 bulk executor bytecode, n
   several batches in flight. Throughput control still caps aggregate RU, so this cannot cause a 429 storm.
 
 **Honest caveat about the .NET baseline:** the .NET app (`src_dotnet/`) already sets
-`AllowBulkExecution = true`, so it is *not* missing bulk batching. What it *is* missing — confirmed by
-grepping the source: no `ThroughputControlGroupConfig` / `enableLocalThroughputControlGroup` /
-`enableGlobalThroughputControlGroup` anywhere in `src_dotnet/` (the only matches are inside the
-compiled SDK DLL) — is **throughput control**. The Python app (`src/`) lacks it too. Without an RU
+`AllowBulkExecution = true`, so it is *not* missing bulk batching. What it *is* missing, confirmed by
+grepping the source (no `ThroughputControlGroupConfig` / `enableLocalThroughputControlGroup` /
+`enableGlobalThroughputControlGroup` anywhere in `src_dotnet/`; the only matches are inside the
+compiled SDK DLL), is **throughput control**. The Python app (`src/`) lacks it too. Without an RU
 governor the app runs open-loop: it either under-drives the container (starvation) or overshoots into
 429s and burns time on rate-limit retry backoff, so effective throughput collapses and a bigger VM
 doesn't help. **Throughput control is the primary fix.** The explicit per-partition micro-batch depth
@@ -53,9 +53,9 @@ There are two distinct mechanisms, and it's worth being precise about which does
 Each client tracks its own RU consumption and **pre-emptively paces** requests to stay under a target,
 rather than firing freely and absorbing 429s. You configure the target one of two ways:
 
-- **`targetThroughput`** — an absolute RU/s cap (e.g. 8000). **Required for serverless accounts**,
+- **`targetThroughput`**: an absolute RU/s cap (e.g. 8000). **Required for serverless accounts**,
   where percentage-based thresholds aren't supported.
-- **`targetThroughputThreshold`** — a fraction in `(0, 1]` of the container's *provisioned* RU/s
+- **`targetThroughputThreshold`**: a fraction in `(0, 1]` of the container's *provisioned* RU/s
   (e.g. `0.9` = "use up to 90%"). This is the "saturate to N%" dial.
 
 This is genuine client-side flow control: the SDK delays/queues operations to hold the line, which
@@ -66,7 +66,7 @@ keeps latency stable and avoids the throughput collapse that mass throttling cau
 With `enableGlobalThroughputControlGroup`, the SDK maintains a dedicated **control container** in which
 every client writes a small heartbeat/ledger item (renewed ~every 5s, expiring ~11s). Clients read
 each other's entries and **divide the RU budget among themselves**. So 10 clients sharing a
-100,000 RU/s budget converge to ~10,000 RU/s each — instead of each independently assuming it owns the
+100,000 RU/s budget converge to ~10,000 RU/s each, instead of each independently assuming it owns the
 full budget and collectively hammering the container into throttling.
 
 Use **local** control (`enableLocalThroughputControlGroup`) when a single client/instance should be
@@ -87,10 +87,10 @@ So partition-uniform saturation and RU-budget governance are **two cooperating l
 
 | Layer | Responsibility |
 | --- | --- |
-| Bulk executor | Parallelism + per-partition-range batching → uniform partition utilization |
-| Throughput control | Aggregate RU pacing + fair cross-client budget sharing → no throttling collapse |
+| Bulk executor | Parallelism + per-partition-range batching for uniform partition utilization |
+| Throughput control | Aggregate RU pacing + fair cross-client budget sharing to avoid throttling collapse |
 
-Together they let a single modest client drive a container to its RU ceiling — and let many clients
+Together they let a single modest client drive a container to its RU ceiling, and let many clients
 scale out without stepping on each other. That, not more CPU, is the fix for the idle-VM problem.
 
 ## Layout
@@ -102,6 +102,7 @@ src_java/
     Benchmark.java                          Entry point: client, throughput control, bulk ingest
     BenchmarkConfig.java                    .env + environment configuration loader
     VectorDoc.java                          Synthetic document shape (id, docid, title, text, emb)
+    ValidationMain.java                     Offline (no-network) validation harness
 ```
 
 ## Configuration
@@ -112,7 +113,7 @@ Reads a `.env` file (path via first CLI arg, default `../.env`) plus process env
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `COSMOS_ENDPOINT` | *(required)* | Account endpoint URI |
-| `COSMOS_KEY` | *(empty)* | Account key; empty → `DefaultAzureCredential` (AAD) |
+| `COSMOS_KEY` | *(empty)* | Account key; empty means `DefaultAzureCredential` (AAD) |
 | `COSMOS_DATABASE_NAME` | *(required)* | Database id |
 | `COSMOS_CONTAINER_NAME` | *(required)* | Container id |
 | `TOTAL_DOCS` | `1000000` | Number of docs to write |
@@ -152,7 +153,7 @@ The build produces a shaded (fat) jar with `com.azure.cosmos.bench.Benchmark` as
 
 Because a reachable Cosmos account (or working emulator) may not be available in every environment,
 an offline validation harness exercises the configuration, throughput-control-group construction, and
-bulk-option tuning code paths and asserts the resulting values — no network required:
+bulk-option tuning code paths and asserts the resulting values, with no network required:
 
 ```bash
 java -cp target/cosmos-vector-bench-java.jar com.azure.cosmos.bench.ValidationMain

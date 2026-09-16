@@ -1,6 +1,6 @@
 // Databricks notebook source
 // MAGIC %md
-// MAGIC # Cosmos DB Vector Bulk Ingest — Spark Connector + Throughput Control
+// MAGIC # Cosmos DB Vector Bulk Ingest: Spark Connector + Throughput Control
 // MAGIC
 // MAGIC This notebook reproduces the write workload of the
 // MAGIC [`cosmos-vector-bench`](https://github.com/TheovanKraay/cosmos-vector-bench) benchmark
@@ -13,7 +13,7 @@
 // MAGIC CPU, network, and thread scheduling become the bottleneck long before a high-RU container is
 // MAGIC saturated. The Spark connector spreads bulk ingestion across every executor core, and its
 // MAGIC auto-tuning micro-batching (combined with throughput control) pushes writes right up to the
-// MAGIC RU budget you allow it — making it far easier to saturate a high-RU container.
+// MAGIC RU budget you allow it, making it far easier to saturate a high-RU container.
 // MAGIC
 // MAGIC **Document shape produced here matches the benchmark's fake mode:**
 // MAGIC `id`, `docid`, `title`, `text`, `emb` (a float vector, default 1536 dims, values in `[-1, 1]`).
@@ -57,7 +57,7 @@ val numInputPartitions = (spark.sparkContext.defaultParallelism * 4).max(8)
 
 // ---- Throughput control ----
 // targetThroughputThreshold is a FRACTION (0.0–1.0) of the container's provisioned RU/s that this
-// job is allowed to consume. 0.95 tells the connector to drive at ~95% of the container RUs — i.e.
+// job is allowed to consume. 0.95 tells the connector to drive at ~95% of the container RUs, i.e.
 // deliberately saturate it while leaving a little headroom. Use a lower value if the container is
 // shared with other workloads.
 val throughputControlName = "vectorBulkIngest"
@@ -113,7 +113,7 @@ println("Database/container ensured.")
 // MAGIC %md
 // MAGIC ## 3. Generate synthetic vector documents (distributed)
 // MAGIC
-// MAGIC Documents are generated in parallel on the executors — one Spark partition at a time — so the
+// MAGIC Documents are generated in parallel on the executors, one Spark partition at a time, so the
 // MAGIC driver never has to hold or produce the whole dataset. Each row matches the benchmark's fake doc.
 
 // COMMAND ----------
@@ -160,10 +160,10 @@ println(s"Prepared DataFrame with ${docsDf.rdd.getNumPartitions} partitions.")
 // MAGIC ## 4. Bulk write with throughput control
 // MAGIC
 // MAGIC Key options:
-// MAGIC - `spark.cosmos.write.bulk.enabled=true` — connector bulk mode (auto-tunes micro-batch size).
-// MAGIC - `spark.cosmos.write.strategy=ItemOverwrite` — upsert (idempotent re-runs). Use `ItemAppend`
+// MAGIC - `spark.cosmos.write.bulk.enabled=true`: connector bulk mode (auto-tunes micro-batch size).
+// MAGIC - `spark.cosmos.write.strategy=ItemOverwrite`: upsert (idempotent re-runs). Use `ItemAppend`
 // MAGIC   for pure inserts if you never re-run over the same ids.
-// MAGIC - `spark.cosmos.throughputControl.*` — caps/steers RU usage to the target fraction of the
+// MAGIC - `spark.cosmos.throughputControl.*`: caps/steers RU usage to the target fraction of the
 // MAGIC   container's provisioned throughput. The connector stores its control state in a small
 // MAGIC   dedicated container (`ThroughputControl`) it creates in the same database.
 
@@ -206,7 +206,7 @@ println(f"Ingested $totalDocs%,d docs in $elapsedSec%.1f s  =>  $docsPerSec%,.0f
 // MAGIC ## 5. Verify count
 // MAGIC
 // MAGIC Quick read-back to confirm the documents landed. (For very large loads this count query itself
-// MAGIC consumes RU — run it after ingest, or check the row count in the portal metrics instead.)
+// MAGIC consumes RU, run it after ingest, or check the row count in the portal metrics instead.)
 
 // COMMAND ----------
 
@@ -235,6 +235,6 @@ println(s"Row count in container: ${readback.count()}")
 // MAGIC - **Co-locate** the Spark cluster in the same Azure region as the Cosmos account, and set
 // MAGIC   `spark.cosmos.preferredRegionsList` to that region to cut latency.
 // MAGIC - **Partition key spread:** `docid` is a GUID here, so writes fan out evenly across physical
-// MAGIC   partitions — ideal for saturation. A low-cardinality/hot key would bottleneck regardless of RU.
+// MAGIC   partitions, ideal for saturation. A low-cardinality/hot key would bottleneck regardless of RU.
 // MAGIC - **`spark.cosmos.write.bulk.targetedPayloadSizeInBytes`:** 1536-dim float vectors are ~6 KB+;
 // MAGIC   the default 220 KB batch target is fine, but for much larger docs raise it toward ~1.5 MB.
