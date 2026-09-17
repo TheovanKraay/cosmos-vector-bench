@@ -22,6 +22,20 @@ public static class Worker
         await writer.InsertDocBatchesAsync(batches, sem, metrics, cancellationToken).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// Runs one worker against a caller-owned semaphore. When every worker is handed the same
+    /// instance, total outstanding operations stay fixed instead of scaling with client count.
+    /// </summary>
+    public static async Task RunAsync(
+        CosmosWriter writer,
+        IAsyncEnumerable<List<JsonObject>> batches,
+        WorkerMetrics metrics,
+        SemaphoreSlim sharedInFlight,
+        CancellationToken cancellationToken)
+    {
+        await writer.InsertDocBatchesAsync(batches, sharedInFlight, metrics, cancellationToken).ConfigureAwait(false);
+    }
+
     /// <summary>Runs one worker over raw UTF-8 document batches using the stream-write hot path.</summary>
     public static async Task RunRawAsync(
         CosmosWriter writer,
@@ -32,6 +46,17 @@ public static class Worker
     {
         using var sem = new SemaphoreSlim(maxInFlight, maxInFlight);
         await writer.InsertRawBatchesAsync(batches, sem, metrics, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Raw-batch worker sharing a caller-owned in-flight semaphore across all workers.</summary>
+    public static async Task RunRawAsync(
+        CosmosWriter writer,
+        IAsyncEnumerable<List<DataSource.RawDocument>> batches,
+        WorkerMetrics metrics,
+        SemaphoreSlim sharedInFlight,
+        CancellationToken cancellationToken)
+    {
+        await writer.InsertRawBatchesAsync(batches, sharedInFlight, metrics, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>Adapts a synchronous bulk generator (fake mode) to the async batch interface.</summary>

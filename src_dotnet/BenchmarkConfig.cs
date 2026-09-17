@@ -22,6 +22,12 @@ public sealed class BenchmarkConfig
     public int ClientProcesses { get; private init; }
     public int BulkSize { get; private init; }
     public int MaxInFlight { get; private init; }
+
+    /// <summary>
+    /// Optional cap on concurrent operations across ALL workers combined (<c>MAX_IN_FLIGHT_TOTAL</c>).
+    /// Zero keeps the legacy per-worker behaviour, where offered load is clients x MaxInFlight.
+    /// </summary>
+    public int MaxInFlightTotal { get; private init; }
     public int MaxPendingBulks { get; private init; }
     public int MaxInsertRetries { get; private init; }
     public int InsertRetryDelayMs { get; private init; }
@@ -96,6 +102,7 @@ public sealed class BenchmarkConfig
         int bulkSize = IntEnv("BULK_SIZE", 100);
         int maxInFlightAuto = (int)Math.Ceiling(bulkSize * 1.5);
         int maxInFlight = IntEnvAliasOrAuto("MAX_IN_FLIGHT", "MAX_CONCURRENCY", Math.Max(bulkSize * 2, 40), maxInFlightAuto);
+        int maxInFlightTotal = IntEnv("MAX_IN_FLIGHT_TOTAL", 0, 0);
         int maxPendingBulksDefault = Math.Max(1, Math.Min(8, ((maxInFlight + bulkSize - 1) / bulkSize) * 2));
         int maxPendingBulks = IntEnv("MAX_PENDING_BULKS", maxPendingBulksDefault);
 
@@ -134,6 +141,7 @@ public sealed class BenchmarkConfig
             ClientProcesses = clientProcesses,
             BulkSize = bulkSize,
             MaxInFlight = maxInFlight,
+            MaxInFlightTotal = maxInFlightTotal,
             MaxPendingBulks = maxPendingBulks,
             MaxInsertRetries = IntEnv("MAX_INSERT_RETRIES", 5, 0),
             InsertRetryDelayMs = IntEnv("INSERT_RETRY_DELAY_MS", 50, 0),

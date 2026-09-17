@@ -55,10 +55,13 @@ public static class Program
                   $"session_write_quantum_docs={config.SessionWriteQuantumDocs}, " +
                   $"session_docs={config.SessionIdMinDocs}-{config.SessionIdMaxDocs}"
                 : "";
+            string inFlight = config.MaxInFlightTotal > 0
+                ? $", max_in_flight_total={config.MaxInFlightTotal} (shared)"
+                : $", max_in_flight={config.MaxInFlight}/client (total {(long)config.ClientProcesses * config.MaxInFlight})";
             Console.WriteLine(
                 $"Starting up benchmark run for num_clients={config.ClientProcesses}, " +
                 $"bulk_size={config.BulkSize}, max_documents={config.EffectiveTotalDocs}, " +
-                $"partition_key_fields={string.Join(',', config.PartitionKeyFields)}{syntheticSessions}");
+                $"partition_key_fields={string.Join(',', config.PartitionKeyFields)}{inFlight}{syntheticSessions}");
         }
 
         var benchmark = new Benchmark(config);

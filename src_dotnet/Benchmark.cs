@@ -194,6 +194,16 @@ public sealed class Benchmark
         return exitCode;
     }
 
+    /// <summary>
+    /// One semaphore shared by every worker when <c>MAX_IN_FLIGHT_TOTAL</c> is set, so total
+    /// outstanding operations stay fixed rather than scaling with client count. Null keeps the
+    /// legacy per-worker cap.
+    /// </summary>
+    private SemaphoreSlim? CreateSharedInFlight()
+        => _config.MaxInFlightTotal > 0
+            ? new SemaphoreSlim(_config.MaxInFlightTotal, _config.MaxInFlightTotal)
+            : null;
+
     private async Task<int> RunFakeModeAsync(CosmosWriter writer)
     {
         string text = new string('x', _config.PayloadBytes);
@@ -201,6 +211,7 @@ public sealed class Benchmark
         var metrics = new WorkerMetrics[_config.ClientProcesses];
         var workers = new Task[_config.ClientProcesses];
         using var cts = new CancellationTokenSource();
+        using SemaphoreSlim? sharedInFlight = CreateSharedInFlight();
         double totalStartedAt = Clock.Now;
         var sessionIds = new DataSource.SessionIdAssigner(_config);
 
@@ -210,7 +221,9 @@ public sealed class Benchmark
             metrics[i] = new WorkerMetrics(_config);
             IAsyncEnumerable<List<JsonObject>> batches = Worker.ToAsync(
                 DataSource.GenerateBulks(start, start + count, _config.BulkSize, text, _config, sessionIds), cts.Token);
-            workers[index] = Worker.RunAsync(writer, batches, metrics[index], _config.MaxInFlight, cts.Token);
+            workers[index] = sharedInFlight is null
+                ? Worker.RunAsync(writer, batches, metrics[index], _config.MaxInFlight, cts.Token)
+                : Worker.RunAsync(writer, batches, metrics[index], sharedInFlight, cts.Token);
         }
 
         return await DriveAsync(metrics, workers, _config.EffectiveTotalDocs, totalStartedAt, cts, producer: null).ConfigureAwait(false);
@@ -233,13 +246,16 @@ public sealed class Benchmark
         var metrics = new WorkerMetrics[_config.ClientProcesses];
         var workers = new Task[_config.ClientProcesses];
         using var cts = new CancellationTokenSource();
+        using SemaphoreSlim? sharedInFlight = CreateSharedInFlight();
         double totalStartedAt = Clock.Now;
 
         for (int i = 0; i < _config.ClientProcesses; i++)
         {
             metrics[i] = new WorkerMetrics(_config);
             IAsyncEnumerable<List<JsonObject>> batches = Worker.QueueBulks(channel.Reader, _config.BulkSize, cts.Token);
-            workers[i] = Worker.RunAsync(writer, batches, metrics[i], _config.MaxInFlight, cts.Token);
+            workers[i] = sharedInFlight is null
+                ? Worker.RunAsync(writer, batches, metrics[i], _config.MaxInFlight, cts.Token)
+                : Worker.RunAsync(writer, batches, metrics[i], sharedInFlight, cts.Token);
         }
 
         Task<long> producer = Task.Run(() => Produce(channel.Writer, cts.Token), cts.Token);
@@ -262,13 +278,16 @@ public sealed class Benchmark
         var metrics = new WorkerMetrics[_config.ClientProcesses];
         var workers = new Task[_config.ClientProcesses];
         using var cts = new CancellationTokenSource();
+        using SemaphoreSlim? sharedInFlight = CreateSharedInFlight();
         double totalStartedAt = Clock.Now;
 
         for (int i = 0; i < _config.ClientProcesses; i++)
         {
             metrics[i] = new WorkerMetrics(_config);
             IAsyncEnumerable<List<DataSource.RawDocument>> batches = Worker.QueueBulks(channel.Reader, _config.BulkSize, cts.Token);
-            workers[i] = Worker.RunRawAsync(writer, batches, metrics[i], _config.MaxInFlight, cts.Token);
+            workers[i] = sharedInFlight is null
+                ? Worker.RunRawAsync(writer, batches, metrics[i], _config.MaxInFlight, cts.Token)
+                : Worker.RunRawAsync(writer, batches, metrics[i], sharedInFlight, cts.Token);
         }
 
         Task<long> producer = Task.Run(() => ProduceRaw(channel.Writer, cts.Token), cts.Token);
