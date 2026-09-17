@@ -34,6 +34,9 @@ public final class BenchmarkConfig {
     public final int maxMicroBatchConcurrency; // per-partition in-flight batches (SDK default 1)
     public final int maxMicroBatchSize;        // ops per micro-batch (SDK cap 100 in direct mode)
     public final int bulkWorkers;              // # concurrent bulk pipelines (app-level parallelism)
+    public final int initialMicroBatchSize;    // adaptive sizer's starting point (ramps up from here)
+    public final int maxInFlightPerWorker;     // semaphore bound on in-flight ops per worker
+    public final int maxRetryCount;            // app-level retry cap per operation
     public final boolean useGatewayMode;  // needed for the HTTP-only emulator; DIRECT for production
     public final String preferredRegion;  // optional, empty => none
 
@@ -73,6 +76,14 @@ public final class BenchmarkConfig {
         // Default to the available processor count; override with BULK_WORKERS.
         this.bulkWorkers = Math.max(1,
                 intVal(c, "BULK_WORKERS", Runtime.getRuntime().availableProcessors()));
+        // Adaptive micro-batch sizing: start small and let the SDK's thresholds feedback loop grow
+        // batch size toward the container's sweet spot. Mirrors INITIAL_MICRO_BATCH_SIZE=1 default.
+        this.initialMicroBatchSize = Math.max(1, intVal(c, "INITIAL_MICRO_BATCH_SIZE", 1));
+        // Per-worker in-flight bound (semaphore). Keeps memory flat while the pipeline stays full.
+        // The reference sample uses ~167K permits per CPU; default to a conservative 100K here.
+        this.maxInFlightPerWorker = Math.max(1, intVal(c, "MAX_INFLIGHT_PER_WORKER", 100_000));
+        // App-level retry cap per operation (jittered backoff on 429/408/449/500/503/410).
+        this.maxRetryCount = Math.max(0, intVal(c, "MAX_RETRY_COUNT", 20));
         this.useGatewayMode = boolVal(c, "USE_GATEWAY_MODE", false);
         this.preferredRegion = get(c, "COSMOS_PREFERRED_REGION", "");
 

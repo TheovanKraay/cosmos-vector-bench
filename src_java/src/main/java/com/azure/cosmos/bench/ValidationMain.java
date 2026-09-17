@@ -35,6 +35,8 @@ public final class ValidationMain {
         validateBulkOptionsTuning();
         validateConcurrencyClamp();
         validateBulkWorkers();
+        validateRetryAndAdaptiveTuning();
+        validateRetryClassification();
 
         System.out.printf("%n== %d checks, %d failures ==%n", checks, failures);
         if (failures > 0) {
@@ -65,6 +67,9 @@ public final class ValidationMain {
         check("default micro-batch concurrency=5 (SDK max; >default of 1)", c.maxMicroBatchConcurrency == 5);
         check("micro-batch size default=100", c.maxMicroBatchSize == 100);
         check("bulkWorkers defaults to >=1 (available cores)", c.bulkWorkers >= 1);
+        check("initialMicroBatchSize default=1 (adaptive sizer ramps up)", c.initialMicroBatchSize == 1);
+        check("maxInFlightPerWorker default=100000", c.maxInFlightPerWorker == 100_000);
+        check("maxRetryCount default=20", c.maxRetryCount == 20);
         Files.deleteIfExists(env);
     }
 
@@ -78,6 +83,38 @@ public final class ValidationMain {
                 "COSMOS_CONTAINER_NAME=coll", "BULK_WORKERS=0");
         check("BULK_WORKERS=0 floored to 1", BenchmarkConfig.load(z.toString()).bulkWorkers == 1);
         Files.deleteIfExists(z);
+    }
+
+    private static void validateRetryAndAdaptiveTuning() throws Exception {
+        section("Adaptive sizing + app-level retry knobs");
+        Path env = writeEnv("COSMOS_ENDPOINT=https://x/", "COSMOS_DATABASE_NAME=db",
+                "COSMOS_CONTAINER_NAME=coll", "INITIAL_MICRO_BATCH_SIZE=3",
+                "MAX_INFLIGHT_PER_WORKER=250000", "MAX_RETRY_COUNT=50");
+        BenchmarkConfig c = BenchmarkConfig.load(env.toString());
+        check("INITIAL_MICRO_BATCH_SIZE honored", c.initialMicroBatchSize == 3);
+        check("MAX_INFLIGHT_PER_WORKER honored", c.maxInFlightPerWorker == 250_000);
+        check("MAX_RETRY_COUNT honored", c.maxRetryCount == 50);
+        Files.deleteIfExists(env);
+        Path z = writeEnv("COSMOS_ENDPOINT=https://x/", "COSMOS_DATABASE_NAME=db",
+                "COSMOS_CONTAINER_NAME=coll", "INITIAL_MICRO_BATCH_SIZE=0", "MAX_INFLIGHT_PER_WORKER=0");
+        BenchmarkConfig d = BenchmarkConfig.load(z.toString());
+        check("INITIAL_MICRO_BATCH_SIZE floored to 1", d.initialMicroBatchSize == 1);
+        check("MAX_INFLIGHT_PER_WORKER floored to 1", d.maxInFlightPerWorker == 1);
+        Files.deleteIfExists(z);
+    }
+
+    private static void validateRetryClassification() {
+        section("Retry-status classification (BulkWorker.shouldRetry)");
+        check("429 (throttled) is retriable", BulkWorker.shouldRetry(429));
+        check("408 (timeout) is retriable", BulkWorker.shouldRetry(408));
+        check("449 (retry-with) is retriable", BulkWorker.shouldRetry(449));
+        check("500 is retriable", BulkWorker.shouldRetry(500));
+        check("503 is retriable", BulkWorker.shouldRetry(503));
+        check("410 (gone/split) is retriable", BulkWorker.shouldRetry(410));
+        check("201 (created) is NOT retriable", !BulkWorker.shouldRetry(201));
+        check("409 (conflict) is NOT retriable (handled as success)", !BulkWorker.shouldRetry(409));
+        check("400 (bad request) is NOT retriable", !BulkWorker.shouldRetry(400));
+        check("404 (not found) is NOT retriable", !BulkWorker.shouldRetry(404));
     }
 
     private static void validateThresholdVsAbsolute() throws Exception {

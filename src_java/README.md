@@ -10,20 +10,34 @@ high-RU Cosmos container, and how do you fix it?*
 
 ## TL;DR
 
-- **Parallel bulk pipelines** are the engine. A *single* `executeBulkOperations` call will **not**
-  saturate a large VM (e.g. 96 cores): the bulk executor's parallelism is bounded by
-  (number of physical partitions) x (per-partition micro-batch concurrency, max 5), **not** by your
-  core count. So this sample runs `BULK_WORKERS` independent bulk pipelines concurrently (default =
-  available cores), each ingesting a shard of the data, mirroring the Azure distributed-bulk sample's
-  `MAX_CONCURRENT_BATCHES_PER_MACHINE`.
-- **Throughput control** is the ceiling, not the engine. All parallel pipelines share one
-  throughput-control group, so aggregate RU is paced just under the container's limit (avoiding mass
-  429s) and, in global mode, one RU budget is shared fairly across multiple cooperating clients.
+This sample is a faithful single-VM analogue of the official
+[Azure distributed-bulk sample](https://github.com/Azure/azure-cosmos-distributed-bulk-sample)'s
+per-machine writer, combined with throughput control (which that sample does not use). Four cooperating
+mechanisms:
 
-The key insight: **you need both.** Parallelism without throughput control throttles the container into
-429 collapse; throughput control without parallelism paces work that was never generated, leaving a
-high RU budget unused. A single-pipeline design (or a single-threaded bulk loop) leaves a big VM idle
-regardless of RU budget, which is exactly the saturation problem seen with the .NET sample.
+- **Parallel bulk pipelines** (the engine). A *single* `executeBulkOperations` call will **not**
+  saturate a large VM: its parallelism is bounded by (number of physical partitions) x (per-partition
+  micro-batch depth, max 5), **not** by core count. So this runs `BULK_WORKERS` independent bulk
+  pipelines concurrently (default = available cores), each ingesting a shard. Mirrors the reference
+  sample's `MAX_CONCURRENT_BATCHES_PER_MACHINE`.
+- **Adaptive micro-batch sizing** (the auto-tuner). All workers share one JVM-scoped
+  `CosmosBulkExecutionThresholdsState`, so the SDK's feedback loop grows batch size from
+  `INITIAL_MICRO_BATCH_SIZE=1` toward the container's sweet spot instead of overshooting into 429s.
+  This is the SDK's own throughput self-tuner and is one of the biggest levers.
+- **App-level retry** (don't drop work). Each worker feeds its bulk call from a live `Sinks.Many`
+  emitter, so throttled/transient failures (429/408/449/500/503/410) are re-injected into the *same*
+  running pipeline with jittered backoff that honors the server's `Retry-After`. A per-worker
+  `Semaphore` bounds in-flight ops so memory stays flat while the pipeline stays full. 409 Conflict
+  is treated as success (idempotent re-runs).
+- **Throughput control** (the ceiling, not the engine). All workers share one throughput-control
+  group, so aggregate RU is paced just under the container limit (avoiding mass 429s) and, in global
+  mode, one RU budget is shared fairly across cooperating clients.
+
+The key insight: **you need all of these together.** Parallelism without throughput control throttles
+into 429 collapse; throughput control without parallelism paces work that was never generated, leaving
+a high RU budget unused; and without adaptive sizing + retry you either overshoot into throttling or
+lose throttled operations. A single-pipeline design leaves a big VM idle regardless of RU budget,
+which is exactly the saturation problem seen with the .NET sample.
 
 ## Validation: does this actually fix the .NET saturation problem?
 
@@ -114,7 +128,8 @@ alone is enough.
 src_java/
   pom.xml                                   Maven build (shaded runnable jar)
   src/main/java/com/azure/cosmos/bench/
-    Benchmark.java                          Entry point: client, throughput control, parallel bulk ingest
+    Benchmark.java                          Entry point: client, throughput control, launches workers
+    BulkWorker.java                         One pipeline: live sink + semaphore + adaptive sizing + retry
     BenchmarkConfig.java                    .env + environment configuration loader
     VectorDoc.java                          Synthetic document shape (id, docid, title, text, emb)
     ValidationMain.java                     Offline (no-network) validation harness
@@ -139,6 +154,9 @@ Reads a `.env` file (path via first CLI arg, default `../.env`) plus process env
 | `MAX_MICRO_BATCH_CONCURRENCY` | `5` | Per-partition in-flight batches (SDK default 1, valid range [1,5]) |
 | `MAX_MICRO_BATCH_SIZE` | `100` | Ops per micro-batch (SDK direct-mode cap is 100) |
 | `BULK_WORKERS` | *(available cores)* | Number of concurrent bulk pipelines (app-level parallelism to use all cores) |
+| `INITIAL_MICRO_BATCH_SIZE` | `1` | Adaptive sizer's starting batch size; the SDK ramps up from here |
+| `MAX_INFLIGHT_PER_WORKER` | `100000` | Semaphore bound on in-flight ops per worker (backpressure / OOM guard) |
+| `MAX_RETRY_COUNT` | `20` | App-level retry cap per op (jittered backoff on 429/408/449/500/503/410) |
 | `USE_GATEWAY_MODE` | `false` | Gateway vs. direct transport |
 | `COSMOS_PREFERRED_REGION` | *(empty)* | Optional preferred region |
 | `THROUGHPUT_CONTROL_ENABLED` | `true` | Enable throughput control |

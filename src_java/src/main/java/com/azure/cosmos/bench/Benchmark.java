@@ -7,11 +7,8 @@ import com.azure.cosmos.CosmosAsyncDatabase;
 import com.azure.cosmos.GlobalThroughputControlConfig;
 import com.azure.cosmos.ThroughputControlGroupConfig;
 import com.azure.cosmos.ThroughputControlGroupConfigBuilder;
-import com.azure.cosmos.models.CosmosBulkOperations;
-import com.azure.cosmos.models.CosmosBulkItemResponse;
-import com.azure.cosmos.models.CosmosBulkOperationResponse;
-import com.azure.cosmos.models.CosmosItemOperation;
 import com.azure.cosmos.models.CosmosBulkExecutionOptions;
+import com.azure.cosmos.models.CosmosBulkExecutionThresholdsState;
 import com.azure.cosmos.models.CosmosContainerProperties;
 import com.azure.cosmos.models.CosmosVectorEmbedding;
 import com.azure.cosmos.models.CosmosVectorEmbeddingPolicy;
@@ -22,17 +19,17 @@ import com.azure.cosmos.models.CosmosVectorIndexType;
 import com.azure.cosmos.models.ExcludedPath;
 import com.azure.cosmos.models.IncludedPath;
 import com.azure.cosmos.models.IndexingPolicy;
-import com.azure.cosmos.models.PartitionKey;
 import com.azure.cosmos.models.ThroughputProperties;
 import com.azure.identity.DefaultAzureCredentialBuilder;
-import reactor.core.publisher.Flux;
 import reactor.core.scheduler.Scheduler;
 import reactor.core.scheduler.Schedulers;
 
 import java.time.Duration;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
@@ -61,8 +58,10 @@ public final class Benchmark {
                 "Throughput control: enabled=%s group=%s global=%s threshold=%s targetRU=%s%n",
                 cfg.throughputControlEnabled, cfg.throughputControlGroup, cfg.globalControl,
                 cfg.targetThroughputThreshold, cfg.targetThroughput);
-        System.out.printf("Bulk tuning: maxMicroBatchConcurrency=%d maxMicroBatchSize=%d bulkWorkers=%d%n",
-                cfg.maxMicroBatchConcurrency, cfg.maxMicroBatchSize, cfg.bulkWorkers);
+        System.out.printf("Bulk tuning: initialMicroBatchSize=%d maxMicroBatchConcurrency=%d "
+                + "maxMicroBatchSize=%d bulkWorkers=%d maxInFlight/worker=%d maxRetryCount=%d%n",
+                cfg.initialMicroBatchSize, cfg.maxMicroBatchConcurrency, cfg.maxMicroBatchSize,
+                cfg.bulkWorkers, cfg.maxInFlightPerWorker, cfg.maxRetryCount);
 
         CosmosAsyncClient client = buildClient(cfg);
         try {
@@ -142,64 +141,63 @@ public final class Benchmark {
         AtomicLong totalRu = new AtomicLong(); // RU * 1000, fixed-point to stay lock-free
 
         // ---------------------------------------------------------------------------------------
-        // WHY MULTIPLE PARALLEL BULK PIPELINES (and not a single executeBulkOperations call):
+        // ARCHITECTURE (faithful single-VM analogue of the Azure distributed-bulk sample):
         //
-        // A single executeBulkOperations() consumes ONE input Flux. The bulk executor groups by
-        // physical partition and paces each partition's micro-batch depth (SDK default 1, max 5).
-        // It does NOT spin up worker threads proportional to CPU cores -- overall parallelism is
-        // bounded by (#physical partitions) x (micro-batch concurrency <= 5), not by core count.
-        // On a large VM (e.g. 96 cores) a single pipeline therefore leaves most cores idle, which is
-        // exactly the saturation problem the .NET sample hits.
+        //  * PARALLELISM is the engine. A single executeBulkOperations() consumes one input and its
+        //    parallelism is bounded by (#physical partitions) x (per-partition micro-batch depth,
+        //    max 5), NOT by CPU cores. So we run `bulkWorkers` INDEPENDENT pipelines (BulkWorker),
+        //    one per shard, to actually use a large VM. Mirrors MAX_CONCURRENT_BATCHES_PER_MACHINE.
         //
-        // The Azure distributed-bulk sample solves this with MAX_CONCURRENT_BATCHES_PER_MACHINE
-        // ("~25%-100% of CPU cores") -- i.e. it runs MANY concurrent bulk executions per machine.
-        // We do the same here: shard the workload across `bulkWorkers` independent pipelines, each
-        // running its own executeBulkOperations, all bound to the SAME throughput-control group so
-        // aggregate RU stays governed. Parallelism (the engine) comes from the workers; throughput
-        // control (the ceiling) keeps them from collectively throttling the container.
+        //  * Each worker feeds its bulk call from a LIVE Sinks.Many emitter (not a finite Flux) so
+        //    the app-level RETRY path can re-inject throttled/transient failures into the SAME
+        //    running pipeline, with jittered backoff honoring server Retry-After. A per-worker
+        //    SEMAPHORE bounds in-flight ops to keep memory flat while the pipeline stays full.
         //
-        // Throughput control is a ceiling, not an engine: it can only pace work that the pipelines
-        // actually generate. Without enough parallel pipelines a high RU budget stays unused.
+        //  * ADAPTIVE MICRO-BATCH SIZING: all workers share one JVM-scoped
+        //    CosmosBulkExecutionThresholdsState, so the SDK's feedback loop grows batch size from
+        //    initialMicroBatchSize toward the container's sweet spot instead of overshooting into
+        //    429s. This is the SDK's own auto-tuner and is arguably the biggest saturation lever.
+        //
+        //  * THROUGHPUT CONTROL is the ceiling, not the engine. All workers share one control group
+        //    (wired via bulk options) so aggregate RU is paced just under the container limit.
         // ---------------------------------------------------------------------------------------
         int workers = Math.max(1, cfg.bulkWorkers);
         long total = cfg.totalDocs;
 
-        CosmosBulkExecutionOptions options = new CosmosBulkExecutionOptions();
-        if (cfg.throughputControlEnabled && groupConfig != null) {
-            options.setThroughputControlGroupName(cfg.throughputControlGroup);
-        }
-        // SDK per-partition micro-batch depth (default 1, valid range [1,5]); config clamps into range.
-        options.setMaxMicroBatchConcurrency(cfg.maxMicroBatchConcurrency);
-        options.setMaxMicroBatchSize(cfg.maxMicroBatchSize);
+        // One thresholds state shared across all workers => one adaptive-sizing feedback loop.
+        CosmosBulkExecutionThresholdsState thresholds = new CosmosBulkExecutionThresholdsState();
 
-        // A dedicated bounded scheduler so the parallel pipelines don't starve the SDK's own I/O
-        // schedulers. Sized to the worker count.
-        Scheduler pool = Schedulers.newBoundedElastic(
+        // A scheduled pool for jittered retries; a response scheduler so response handling never
+        // blocks the SDK's IO threads; a launcher pool to run each blocking worker shard.
+        Scheduler responseScheduler = Schedulers.newBoundedElastic(
                 Math.max(workers, Schedulers.DEFAULT_BOUNDED_ELASTIC_SIZE),
-                Integer.MAX_VALUE, "bulk-workers");
+                Integer.MAX_VALUE, "bulk-responses");
+        ScheduledExecutorService retryScheduler = Executors.newScheduledThreadPool(
+                Math.max(1, workers / 4 + 1));
+        ExecutorService launcher = Executors.newFixedThreadPool(workers);
 
-        System.out.printf("Parallel bulk workers: %d (each a separate executeBulkOperations pipeline, "
-                + "sharing throughput-control group)%n", workers);
+        System.out.printf("Parallel bulk workers: %d (each: live sink + semaphore + app-level retry, "
+                + "sharing one adaptive-thresholds state and throughput-control group)%n", workers);
 
         long start = System.nanoTime();
         try {
-            // Launch `workers` independent bulk pipelines, each owning a contiguous shard of the doc
-            // range, and run them concurrently. Flux.merge with concurrency=workers subscribes to all.
-            Flux.range(0, workers)
-                    .flatMap(w -> {
-                        long shardStart = (total * w) / workers;
-                        long shardEnd = (total * (w + 1)) / workers;
-                        Flux<CosmosItemOperation> ops =
-                                buildOperations(shardStart, shardEnd, cfg, filler)
-                                        .subscribeOn(pool);
-                        return container.executeBulkOperations(ops, options)
-                                .doOnNext(response -> record(response, success, throttled, failed, totalRu))
-                                .subscribeOn(pool);
-                    }, workers)
-                    .then()
-                    .block();
+            List<java.util.concurrent.Future<?>> futures = new java.util.ArrayList<>();
+            for (int w = 0; w < workers; w++) {
+                long shardStart = (total * w) / workers;
+                long shardEnd = (total * (w + 1)) / workers;
+                BulkWorker worker = new BulkWorker(container, cfg, thresholds, retryScheduler,
+                        responseScheduler, success, throttled, failed, totalRu);
+                futures.add(launcher.submit(() -> worker.runShard(shardStart, shardEnd, filler)));
+            }
+            for (java.util.concurrent.Future<?> f : futures) {
+                f.get();
+            }
+        } catch (Exception e) {
+            throw new RuntimeException("Bulk ingest failed", e);
         } finally {
-            pool.dispose();
+            launcher.shutdownNow();
+            retryScheduler.shutdownNow();
+            responseScheduler.dispose();
         }
 
         double elapsedSec = (System.nanoTime() - start) / 1e9;
@@ -209,53 +207,6 @@ public final class Benchmark {
                 "%nDone: succeeded=%,d throttled(429)=%,d failed=%,d in %.1fs => %,.0f docs/sec, %,.0f RU consumed (%.0f RU/s avg)%n",
                 success.get(), throttled.get(), failed.get(), elapsedSec, docsPerSec, ru,
                 ru / Math.max(elapsedSec, 1e-9));
-    }
-
-    /** Build a lazy stream of create operations for the half-open doc-index shard [start, end). */
-    private static Flux<CosmosItemOperation> buildOperations(long start, long end, BenchmarkConfig cfg,
-                                                             String filler) {
-        return Flux.range(0, (int) (end - start))
-                .map(offset -> {
-                    long i = start + offset;
-                    // Thread-local RNG: each pipeline runs on its own worker thread, so a shared
-                    // Random would be a contention point. ThreadLocalRandom avoids that.
-                    java.util.concurrent.ThreadLocalRandom rnd =
-                            java.util.concurrent.ThreadLocalRandom.current();
-                    List<Float> emb = new ArrayList<>(cfg.vectorDim);
-                    for (int d = 0; d < cfg.vectorDim; d++) {
-                        emb.add(rnd.nextFloat() * 2.0f - 1.0f); // [-1, 1]
-                    }
-                    String docid = UUID.randomUUID().toString();
-                    VectorDoc doc = new VectorDoc(
-                            UUID.randomUUID().toString(), docid, "Document " + i, filler, emb);
-                    return CosmosBulkOperations.getCreateItemOperation(doc, new PartitionKey(docid));
-                });
-    }
-
-    /** Tally one bulk item response into the shared counters. */
-    private static void record(CosmosBulkOperationResponse<?> response, AtomicLong success,
-                               AtomicLong throttled, AtomicLong failed, AtomicLong totalRu) {
-        CosmosBulkItemResponse item = response.getResponse();
-        if (item != null && item.isSuccessStatusCode()) {
-            success.incrementAndGet();
-            totalRu.addAndGet((long) (item.getRequestCharge() * 1000));
-        } else {
-            int status = item != null ? item.getStatusCode() : -1;
-            if (status == 429) {
-                throttled.incrementAndGet();
-            } else {
-                failed.incrementAndGet();
-                if (failed.get() <= 5) {
-                    Exception ex = response.getException();
-                    System.out.printf("  [error sample] status=%d ex=%s%n",
-                            status, ex != null ? ex.getMessage() : "n/a");
-                }
-            }
-        }
-        long done = success.get();
-        if (done > 0 && done % 100_000 == 0) {
-            System.out.printf("  ... %,d succeeded%n", done);
-        }
     }
 
     /** Optionally create the target container with a vector embedding policy + quantizedFlat index on /emb. */
