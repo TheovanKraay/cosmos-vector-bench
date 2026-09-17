@@ -23,7 +23,7 @@ public final class BenchmarkConfig {
     public final String database;
     public final String container;
 
-    // Workload (fake mode) — same knobs as the .NET/Python versions
+    // Workload (fake mode): same knobs as the .NET/Python versions
     public final int totalDocs;         // TOTAL_DOCS
     public final int vectorDim;         // FAKE_DATA_VECTOR_DIM
     public final int payloadBytes;      // PAYLOAD_BYTES
@@ -37,7 +37,7 @@ public final class BenchmarkConfig {
     public final boolean useGatewayMode;  // needed for the HTTP-only emulator; DIRECT for production
     public final String preferredRegion;  // optional, empty => none
 
-    // Throughput control — the whole point of this port
+    // Throughput control: the whole point of this port
     public final boolean throughputControlEnabled;   // THROUGHPUT_CONTROL_ENABLED (default true)
     public final String throughputControlGroup;      // THROUGHPUT_CONTROL_GROUP_NAME
     public final Double targetThroughputThreshold;   // 0..1 fraction of provisioned RU, or null

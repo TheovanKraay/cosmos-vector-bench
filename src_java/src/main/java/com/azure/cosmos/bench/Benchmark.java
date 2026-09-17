@@ -127,7 +127,7 @@ public final class Benchmark {
             // Absolute RU/s cap. Required for serverless accounts (percentage not supported there).
             b.targetThroughput(cfg.targetThroughput);
         } else if (cfg.targetThroughputThreshold != null) {
-            // Fraction (0,1] of the container's provisioned RU/s — the "saturate to N%" dial.
+            // Fraction (0,1] of the container's provisioned RU/s: the "saturate to N%" dial.
             b.targetThroughputThreshold(cfg.targetThroughputThreshold);
         }
         return b.build();
