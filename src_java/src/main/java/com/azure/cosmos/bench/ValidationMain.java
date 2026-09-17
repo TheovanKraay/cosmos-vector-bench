@@ -34,6 +34,7 @@ public final class ValidationMain {
         validateThroughputControlGroupAbsolute();
         validateBulkOptionsTuning();
         validateConcurrencyClamp();
+        validateBulkWorkers();
 
         System.out.printf("%n== %d checks, %d failures ==%n", checks, failures);
         if (failures > 0) {
@@ -63,7 +64,20 @@ public final class ValidationMain {
         check("no absolute RU by default", c.targetThroughput == null);
         check("default micro-batch concurrency=5 (SDK max; >default of 1)", c.maxMicroBatchConcurrency == 5);
         check("micro-batch size default=100", c.maxMicroBatchSize == 100);
+        check("bulkWorkers defaults to >=1 (available cores)", c.bulkWorkers >= 1);
         Files.deleteIfExists(env);
+    }
+
+    private static void validateBulkWorkers() throws Exception {
+        section("App-level parallelism: BULK_WORKERS override");
+        Path env = writeEnv("COSMOS_ENDPOINT=https://x/", "COSMOS_DATABASE_NAME=db",
+                "COSMOS_CONTAINER_NAME=coll", "BULK_WORKERS=32");
+        check("BULK_WORKERS=32 honored", BenchmarkConfig.load(env.toString()).bulkWorkers == 32);
+        Files.deleteIfExists(env);
+        Path z = writeEnv("COSMOS_ENDPOINT=https://x/", "COSMOS_DATABASE_NAME=db",
+                "COSMOS_CONTAINER_NAME=coll", "BULK_WORKERS=0");
+        check("BULK_WORKERS=0 floored to 1", BenchmarkConfig.load(z.toString()).bulkWorkers == 1);
+        Files.deleteIfExists(z);
     }
 
     private static void validateThresholdVsAbsolute() throws Exception {

@@ -33,6 +33,7 @@ public final class BenchmarkConfig {
     public final int bulkFlushMicroBatch; // maps to Cosmos bulk micro-batch target (BULK_SIZE analogue)
     public final int maxMicroBatchConcurrency; // per-partition in-flight batches (SDK default 1)
     public final int maxMicroBatchSize;        // ops per micro-batch (SDK cap 100 in direct mode)
+    public final int bulkWorkers;              // # concurrent bulk pipelines (app-level parallelism)
     public final boolean useGatewayMode;  // needed for the HTTP-only emulator; DIRECT for production
     public final String preferredRegion;  // optional, empty => none
 
@@ -65,6 +66,13 @@ public final class BenchmarkConfig {
         // user-supplied value into the valid range so the app never throws at runtime.
         this.maxMicroBatchConcurrency = clamp(intVal(c, "MAX_MICRO_BATCH_CONCURRENCY", 5), 1, 5);
         this.maxMicroBatchSize = Math.min(intVal(c, "MAX_MICRO_BATCH_SIZE", 100), 100);
+        // App-level parallelism: number of independent bulk pipelines to run concurrently on this
+        // machine. This is the real "engine" for saturating a large VM -- a single
+        // executeBulkOperations pipeline will not use all cores of, say, a 96-core box. Mirrors the
+        // Azure distributed-bulk sample's MAX_CONCURRENT_BATCHES_PER_MACHINE (~25%-100% of cores).
+        // Default to the available processor count; override with BULK_WORKERS.
+        this.bulkWorkers = Math.max(1,
+                intVal(c, "BULK_WORKERS", Runtime.getRuntime().availableProcessors()));
         this.useGatewayMode = boolVal(c, "USE_GATEWAY_MODE", false);
         this.preferredRegion = get(c, "COSMOS_PREFERRED_REGION", "");
 

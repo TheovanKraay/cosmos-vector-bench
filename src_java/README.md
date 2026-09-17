@@ -10,39 +10,51 @@ high-RU Cosmos container, and how do you fix it?*
 
 ## TL;DR
 
-- **Bulk executor** (`executeBulkOperations`) gives parallelism across physical partitions. This is
-  what actually saturates a container uniformly.
-- **Throughput control** → paces aggregate RU consumption just under the container's ceiling (avoiding
-  mass 429s) and, in global mode, fairly shares one RU budget across multiple cooperating clients.
+- **Parallel bulk pipelines** are the engine. A *single* `executeBulkOperations` call will **not**
+  saturate a large VM (e.g. 96 cores): the bulk executor's parallelism is bounded by
+  (number of physical partitions) x (per-partition micro-batch concurrency, max 5), **not** by your
+  core count. So this sample runs `BULK_WORKERS` independent bulk pipelines concurrently (default =
+  available cores), each ingesting a shard of the data, mirroring the Azure distributed-bulk sample's
+  `MAX_CONCURRENT_BATCHES_PER_MACHINE`.
+- **Throughput control** is the ceiling, not the engine. All parallel pipelines share one
+  throughput-control group, so aggregate RU is paced just under the container's limit (avoiding mass
+  429s) and, in global mode, one RU budget is shared fairly across multiple cooperating clients.
 
-The single async-loop-per-worker design used by the Python/.NET apps has *neither* a real
-partition-aware batching layer *nor* an RU governor, which is exactly why extra CPU sits idle: the
-bottleneck is not CPU, it's how requests are dispatched and paced.
+The key insight: **you need both.** Parallelism without throughput control throttles the container into
+429 collapse; throughput control without parallelism paces work that was never generated, leaving a
+high RU budget unused. A single-pipeline design (or a single-threaded bulk loop) leaves a big VM idle
+regardless of RU budget, which is exactly the saturation problem seen with the .NET sample.
 
 ## Validation: does this actually fix the .NET saturation problem?
 
-This was checked by reading the Cosmos Java SDK 4.68.0 bulk executor bytecode, not assumed:
+This was checked by reading the Cosmos Java SDK 4.68.0 bulk executor bytecode and by cross-checking the
+official [Azure distributed-bulk sample](https://github.com/Azure/azure-cosmos-distributed-bulk-sample),
+not assumed:
 
-- **Cross-partition fan-out is automatic.** `BulkExecutor` keys a `ConcurrentMap<partitionKeyRangeId,
-  PartitionScopeThresholds>` and runs each partition group concurrently, so writes spread across
-  physical partitions without app-side orchestration.
-- **Per-partition micro-batch concurrency defaults to 1** (`Configs.DEFAULT_MAX_BULK_MICRO_BATCH_CONCURRENCY = 1`),
-  with `maxMicroBatchSize = 100`. On a container with few physical partitions this per-partition depth
-  of 1 can under-drive a high-RU container. This benchmark therefore **explicitly raises**
-  `maxMicroBatchConcurrency` to the SDK maximum (the SDK enforces a valid range of **[1, 5]**; default
-  here is 5, tunable via `MAX_MICRO_BATCH_CONCURRENCY` and clamped into range) so each partition keeps
-  several batches in flight. Throughput control still caps aggregate RU, so this cannot cause a 429 storm.
+- **A single bulk pipeline does not scale to CPU cores.** `executeBulkOperations` consumes one input
+  stream; the executor groups by physical partition and paces each partition's micro-batch depth
+  (default 1, max 5). It does **not** spin up worker threads proportional to core count. The official
+  distributed sample confirms this: it exposes `MAX_CONCURRENT_BATCHES_PER_MACHINE` ("~25% to 100% of
+  CPU cores") and runs **many** concurrent bulk executions per machine. If one bulk call saturated a
+  machine, that knob would not exist. This sample therefore runs `BULK_WORKERS` parallel pipelines.
+- **Cross-partition fan-out within each pipeline is automatic.** `BulkExecutor` keys a
+  `ConcurrentMap<partitionKeyRangeId, PartitionScopeThresholds>` and runs each partition group
+  concurrently, so writes spread across physical partitions without app-side orchestration.
+- **Per-partition micro-batch concurrency defaults to 1** (`DEFAULT_MAX_BULK_MICRO_BATCH_CONCURRENCY`),
+  with `maxMicroBatchSize = 100`. This sample raises `maxMicroBatchConcurrency` to the SDK maximum
+  (enforced range **[1, 5]**; default 5 here, tunable via `MAX_MICRO_BATCH_CONCURRENCY`, clamped into
+  range). Throughput control still caps aggregate RU, so this cannot cause a 429 storm.
 
 **Honest caveat about the .NET baseline:** the .NET app (`src_dotnet/`) already sets
-`AllowBulkExecution = true`, so it is *not* missing bulk batching. What it *is* missing, confirmed by
-grepping the source (no `ThroughputControlGroupConfig` / `enableLocalThroughputControlGroup` /
-`enableGlobalThroughputControlGroup` anywhere in `src_dotnet/`; the only matches are inside the
-compiled SDK DLL), is **throughput control**. The Python app (`src/`) lacks it too. Without an RU
-governor the app runs open-loop: it either under-drives the container (starvation) or overshoots into
-429s and burns time on rate-limit retry backoff, so effective throughput collapses and a bigger VM
-doesn't help. **Throughput control is the primary fix.** The explicit per-partition micro-batch depth
-bump above is a useful secondary optimization. Absolute throughput numbers still require a run against
-a real Cosmos account; the local vnext emulator surfaces an unrelated HTTP/2 transport quirk (see Notes).
+`AllowBulkExecution = true`, so it is *not* missing bulk batching. It has two real gaps: (1) no
+**throughput control** (confirmed by grepping the source: no `ThroughputControlGroupConfig` /
+`enableLocalThroughputControlGroup` / `enableGlobalThroughputControlGroup` anywhere in `src_dotnet/`;
+the only matches are inside the compiled SDK DLL), so it runs open-loop and oscillates into 429
+collapse; and (2) if it drives bulk from insufficient app-level concurrency, a single pipeline cannot
+use all cores of a large VM. This Java sample addresses both: parallel pipelines for the engine, and a
+shared throughput-control group for the ceiling. Absolute throughput numbers still require a run
+against a real Cosmos account; the local vnext emulator surfaces an unrelated HTTP/2 transport quirk
+(see Notes).
 
 ## What throughput control actually does in the Java SDK
 
@@ -78,20 +90,23 @@ A common misconception is that throughput control assigns RU quotas per physical
 spreads load evenly across partitions. It does **not**. Throughput control governs the *aggregate* RU
 budget (per client, or shared across clients).
 
-**What makes writes land uniformly across partitions is the bulk executor.** `executeBulkOperations`
+**What makes writes land uniformly across partitions is the bulk executor**, and **what makes a large
+VM fully utilised is running enough parallel bulk pipelines** (`BULK_WORKERS`). `executeBulkOperations`
 groups operations into **per-partition-key-range micro-batches** and dispatches them in parallel across
 all physical partitions. Throughput control then sits on top of that, pacing the overall rate so you
 ride just under the RU ceiling.
 
-So partition-uniform saturation and RU-budget governance are **two cooperating layers**:
+So saturating a high-RU container from a big VM is **three cooperating layers**:
 
 | Layer | Responsibility |
 | --- | --- |
+| Parallel bulk pipelines (`BULK_WORKERS`) | App-level parallelism to actually use all CPU cores |
 | Bulk executor | Parallelism + per-partition-range batching for uniform partition utilization |
 | Throughput control | Aggregate RU pacing + fair cross-client budget sharing to avoid throttling collapse |
 
-Together they let a single modest client drive a container to its RU ceiling, and let many clients
-scale out without stepping on each other. That, not more CPU, is the fix for the idle-VM problem.
+Together they let one large VM drive a container to its RU ceiling, and let many clients scale out
+without stepping on each other. Parallelism is the engine; throughput control is the ceiling. Neither
+alone is enough.
 
 ## Layout
 
@@ -99,7 +114,7 @@ scale out without stepping on each other. That, not more CPU, is the fix for the
 src_java/
   pom.xml                                   Maven build (shaded runnable jar)
   src/main/java/com/azure/cosmos/bench/
-    Benchmark.java                          Entry point: client, throughput control, bulk ingest
+    Benchmark.java                          Entry point: client, throughput control, parallel bulk ingest
     BenchmarkConfig.java                    .env + environment configuration loader
     VectorDoc.java                          Synthetic document shape (id, docid, title, text, emb)
     ValidationMain.java                     Offline (no-network) validation harness
@@ -123,6 +138,7 @@ Reads a `.env` file (path via first CLI arg, default `../.env`) plus process env
 | `BULK_SIZE` | `100` | Micro-batch target hint (analogue of the other ports' `BULK_SIZE`) |
 | `MAX_MICRO_BATCH_CONCURRENCY` | `5` | Per-partition in-flight batches (SDK default 1, valid range [1,5]) |
 | `MAX_MICRO_BATCH_SIZE` | `100` | Ops per micro-batch (SDK direct-mode cap is 100) |
+| `BULK_WORKERS` | *(available cores)* | Number of concurrent bulk pipelines (app-level parallelism to use all cores) |
 | `USE_GATEWAY_MODE` | `false` | Gateway vs. direct transport |
 | `COSMOS_PREFERRED_REGION` | *(empty)* | Optional preferred region |
 | `THROUGHPUT_CONTROL_ENABLED` | `true` | Enable throughput control |
