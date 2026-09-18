@@ -103,6 +103,9 @@ public sealed class MetricsReporter
         if (_config.PartitionKeyRangeRpsEnabled)
         {
             var rangeRps = new SortedDictionary<string, double>(StringComparer.Ordinal);
+            var rangeRequests = new SortedDictionary<string, long>(StringComparer.Ordinal);
+            var rangeThrottles = new SortedDictionary<string, long>(StringComparer.Ordinal);
+            var rangeRu = new SortedDictionary<string, double>(StringComparer.Ordinal);
             long missingHeaderCount = 0;
             foreach (MetricSnapshot snapshot in snapshots)
             {
@@ -112,15 +115,64 @@ public sealed class MetricsReporter
                     rangeRps.TryGetValue(rangeId, out double current);
                     rangeRps[rangeId] = current + rps;
                 }
+
+                foreach ((string rangeId, long count) in snapshot.PartitionKeyRangeRequestTotals)
+                {
+                    rangeRequests.TryGetValue(rangeId, out long current);
+                    rangeRequests[rangeId] = current + count;
+                }
+
+                foreach ((string rangeId, long count) in snapshot.PartitionKeyRangeThrottleTotals)
+                {
+                    rangeThrottles.TryGetValue(rangeId, out long current);
+                    rangeThrottles[rangeId] = current + count;
+                }
+
+                foreach ((string rangeId, double ru) in snapshot.PartitionKeyRangeRuTotals)
+                {
+                    rangeRu.TryGetValue(rangeId, out double current);
+                    rangeRu[rangeId] = current + ru;
+                }
             }
 
             lines.Add("  Partition key range stats");
-            if (rangeRps.Count > 0)
+            if (rangeRequests.Count > 0)
             {
-                foreach ((string rangeId, double rps) in rangeRps)
+                double ruGrandTotal = rangeRu.Values.Sum();
+                double partitionBudgetRu = _config.ContainerThroughputRu > 0
+                    ? (double)_config.ContainerThroughputRu / rangeRequests.Count
+                    : 0.0;
+
+                foreach ((string rangeId, long requests) in rangeRequests)
                 {
-                    lines.Add($"    pkrange_{rangeId}=ops_per_sec={F2(rps)}");
+                    rangeRps.TryGetValue(rangeId, out double rps);
+                    rangeThrottles.TryGetValue(rangeId, out long throttles);
+                    rangeRu.TryGetValue(rangeId, out double ru);
+                    double ruPerSec = Stats.SafeDiv(ru, elapsed);
+                    string utilisation = partitionBudgetRu > 0
+                        ? $", pct_of_partition_budget={F2(Stats.SafeDiv(ruPerSec * 100.0, partitionBudgetRu))}"
+                        : "";
+                    lines.Add(
+                        $"    pkrange_{rangeId}=ops_per_sec={F2(rps)}, requests={requests}, " +
+                        $"throttles={throttles}, throttle_pct={F2(Stats.SafeDiv(throttles * 100.0, requests))}, " +
+                        $"ru_per_sec={F2(ruPerSec)}, pct_of_run_ru={F2(Stats.SafeDiv(ru * 100.0, ruGrandTotal))}{utilisation}");
                 }
+
+                var shares = rangeRu.Values.Select(ru => Stats.SafeDiv(ru * 100.0, ruGrandTotal)).ToList();
+                if (shares.Count > 0)
+                {
+                    double evenShare = 100.0 / shares.Count;
+                    string budgetNote = partitionBudgetRu > 0
+                        ? $", partition_budget_ru_per_sec={F2(partitionBudgetRu)}"
+                        : ", partition_budget_ru_per_sec=unknown (set CONTAINER_THROUGHPUT_RU)";
+                    lines.Add(
+                        $"    skew: ranges={shares.Count}, even_share_pct={F2(evenShare)}, " +
+                        $"min_pct_of_run_ru={F2(shares.Min())}, max_pct_of_run_ru={F2(shares.Max())}, " +
+                        $"spread_pts={F2(shares.Max() - shares.Min())}, " +
+                        $"hot_cold_ratio={F2(Stats.SafeDiv(shares.Max(), shares.Min()))}{budgetNote}");
+                }
+
+                AppendPkRangeSeries(rangeRequests, rangeThrottles, rangeRu);
             }
             else
             {
@@ -140,6 +192,42 @@ public sealed class MetricsReporter
         ]);
 
         return string.Join("\n", lines);
+    }
+
+    /// <summary>Appends cumulative per-range counters each sample so post-processing can derive instantaneous skew.</summary>
+    private void AppendPkRangeSeries(
+        SortedDictionary<string, long> requests,
+        SortedDictionary<string, long> throttles,
+        SortedDictionary<string, double> ru)
+    {
+        if (string.IsNullOrEmpty(_config.PkRangeSeriesPath))
+        {
+            return;
+        }
+
+        try
+        {
+            bool writeHeader = !File.Exists(_config.PkRangeSeriesPath);
+            using var writer = new StreamWriter(_config.PkRangeSeriesPath, append: true);
+            if (writeHeader)
+            {
+                writer.WriteLine("epoch_s,range_id,requests_cum,throttles_cum,ru_cum");
+            }
+
+            double now = Clock.Epoch;
+            foreach ((string rangeId, long count) in requests)
+            {
+                throttles.TryGetValue(rangeId, out long throttleCount);
+                ru.TryGetValue(rangeId, out double ruTotal);
+                writer.WriteLine(string.Create(
+                    CultureInfo.InvariantCulture,
+                    $"{now:F3},{rangeId},{count},{throttleCount},{ruTotal:F2}"));
+            }
+        }
+        catch (IOException)
+        {
+            // Diagnostics only; never fail a benchmark because the series file is unavailable.
+        }
     }
 
     public string BuildSearchAggregateLine(

@@ -25,6 +25,12 @@ public static class CosmosClientFactory
             MaxRetryWaitTimeOnRateLimitedRequests = TimeSpan.FromSeconds(30),
         };
 
+        if (!string.IsNullOrWhiteSpace(config.ConsistencyLevelOverride)
+            && Enum.TryParse(config.ConsistencyLevelOverride, ignoreCase: true, out ConsistencyLevel level))
+        {
+            options.ConsistencyLevel = level;
+        }
+
         if (!string.IsNullOrEmpty(config.CosmosKey))
         {
             return new CosmosClient(config.Endpoint, config.CosmosKey, options);

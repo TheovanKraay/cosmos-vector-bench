@@ -98,6 +98,9 @@ public sealed class ConflictMetricsTests
             RequestChargeTotal = 0,
             RequestChargeObservations = 0,
             PartitionKeyRangeRequestsPerSec = new Dictionary<string, double>(),
+            PartitionKeyRangeRequestTotals = new Dictionary<string, long>(),
+            PartitionKeyRangeThrottleTotals = new Dictionary<string, long>(),
+            PartitionKeyRangeRuTotals = new Dictionary<string, double>(),
             PartitionKeyRangeMissingHeaderCount = 0,
         };
 }

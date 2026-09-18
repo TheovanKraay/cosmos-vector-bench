@@ -28,6 +28,12 @@ public sealed class BenchmarkConfig
     /// Zero keeps the legacy per-worker behaviour, where offered load is clients x MaxInFlight.
     /// </summary>
     public int MaxInFlightTotal { get; private init; }
+
+    /// <summary>
+    /// Optional client-side consistency level (<c>COSMOS_CONSISTENCY_LEVEL</c>). Cosmos only allows
+    /// relaxing below the account default, never strengthening. Empty uses the account default.
+    /// </summary>
+    public string ConsistencyLevelOverride { get; private init; } = "";
     public int MaxPendingBulks { get; private init; }
     public int MaxInsertRetries { get; private init; }
     public int InsertRetryDelayMs { get; private init; }
@@ -35,6 +41,12 @@ public sealed class BenchmarkConfig
     public bool EnableContentResponseOnWrite { get; private init; }
     public bool UseStreamWriter { get; private init; }
     public bool PartitionKeyRangeRpsEnabled { get; private init; }
+
+    /// <summary>Provisioned container RU/s, used only to express per-partition utilisation. 0 = unknown.</summary>
+    public int ContainerThroughputRu { get; private init; }
+
+    /// <summary>When set, appends a per-sample, per-partition-key-range CSV so instantaneous skew can be measured.</summary>
+    public string PkRangeSeriesPath { get; private init; } = "";
     public int PayloadBytes { get; private init; }
     public int FakeDataVectorDim { get; private init; }
     public bool SessionIdEnabled { get; private init; }
@@ -142,6 +154,7 @@ public sealed class BenchmarkConfig
             BulkSize = bulkSize,
             MaxInFlight = maxInFlight,
             MaxInFlightTotal = maxInFlightTotal,
+            ConsistencyLevelOverride = (GetEnv("COSMOS_CONSISTENCY_LEVEL") ?? "").Trim(),
             MaxPendingBulks = maxPendingBulks,
             MaxInsertRetries = IntEnv("MAX_INSERT_RETRIES", 5, 0),
             InsertRetryDelayMs = IntEnv("INSERT_RETRY_DELAY_MS", 50, 0),
@@ -149,6 +162,8 @@ public sealed class BenchmarkConfig
             EnableContentResponseOnWrite = BoolEnv("ENABLE_CONTENT_RESPONSE_ON_WRITE", false),
             UseStreamWriter = BoolEnv("USE_STREAM_WRITER", true),
             PartitionKeyRangeRpsEnabled = BoolEnv("PARTITION_KEY_RANGE_RPS_ENABLED", false),
+            ContainerThroughputRu = IntEnv("CONTAINER_THROUGHPUT_RU", 0, 0),
+            PkRangeSeriesPath = (GetEnv("PKRANGE_SERIES_PATH") ?? "").Trim(),
             PayloadBytes = IntEnv("PAYLOAD_BYTES", 5000, 0),
             FakeDataVectorDim = IntEnv("FAKE_DATA_VECTOR_DIM", 1536, 0),
             SessionIdEnabled = BoolEnv("SESSION_ID_ENABLED", false),

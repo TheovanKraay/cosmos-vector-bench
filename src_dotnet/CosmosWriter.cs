@@ -87,11 +87,17 @@ public sealed class CosmosWriter
 
                     if (_config.PartitionKeyRangeRpsEnabled)
                     {
-                        metrics.RecordPartitionKeyRangeRequest(PartitionKeyRangeIdFromHeaders(response.Headers));
+                        metrics.RecordPartitionKeyRangeRequest(
+                            PartitionKeyRangeIdFromHeaders(response.Headers),
+                            throttled: false,
+                            requestCharge: response.RequestCharge);
                     }
 
                     metrics.RecordSuccess();
-                    metrics.RecordRequestCharge(requestChargeTotal);
+
+                    // Only the successful attempt's charge: accumulating retried attempts inflated
+                    // our RU total ~31% above the service's own TotalRequestUnits.
+                    metrics.RecordRequestCharge(response.RequestCharge);
                     break;
                 }
                 catch (CosmosException ex)
@@ -107,7 +113,10 @@ public sealed class CosmosWriter
 
                     if (_config.PartitionKeyRangeRpsEnabled)
                     {
-                        metrics.RecordPartitionKeyRangeRequest(PartitionKeyRangeIdFromHeaders(ex.Headers));
+                        metrics.RecordPartitionKeyRangeRequest(
+                            PartitionKeyRangeIdFromHeaders(ex.Headers),
+                            throttled: (int)ex.StatusCode == 429,
+                            requestCharge: ex.RequestCharge);
                     }
 
                     if ((int)ex.StatusCode == 429)
@@ -288,7 +297,10 @@ public sealed class CosmosWriter
 
                 if (_config.PartitionKeyRangeRpsEnabled)
                 {
-                    metrics.RecordPartitionKeyRangeRequest(partitionKeyRangeId);
+                    metrics.RecordPartitionKeyRangeRequest(
+                        partitionKeyRangeId,
+                        throttled: statusCode == 429,
+                        requestCharge: charge);
                 }
 
                 if (success)

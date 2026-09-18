@@ -92,6 +92,9 @@ public sealed record MetricSnapshot
     public required double RequestChargeTotal { get; init; }
     public required long RequestChargeObservations { get; init; }
     public required IReadOnlyDictionary<string, double> PartitionKeyRangeRequestsPerSec { get; init; }
+    public required IReadOnlyDictionary<string, long> PartitionKeyRangeRequestTotals { get; init; }
+    public required IReadOnlyDictionary<string, long> PartitionKeyRangeThrottleTotals { get; init; }
+    public required IReadOnlyDictionary<string, double> PartitionKeyRangeRuTotals { get; init; }
     public required long PartitionKeyRangeMissingHeaderCount { get; init; }
 }
 
@@ -157,6 +160,8 @@ public sealed class WorkerMetrics
     private long _requestChargeObservations;
 
     private readonly Dictionary<string, long> _partitionKeyRangeRequestCounts = [];
+    private readonly Dictionary<string, long> _partitionKeyRangeThrottleCounts = [];
+    private readonly Dictionary<string, double> _partitionKeyRangeRuTotals = [];
     private Dictionary<string, long> _partitionKeyRangeLastSampleCounts = [];
     private Dictionary<string, double> _partitionKeyRangeRequestsPerSec = [];
     private long _partitionKeyRangeMissingHeaderCount;
@@ -252,7 +257,7 @@ public sealed class WorkerMetrics
     }
 
     /// <summary>Records one create attempt against its Cosmos partition key range, or a missing-header observation.</summary>
-    public void RecordPartitionKeyRangeRequest(string? partitionKeyRangeId)
+    public void RecordPartitionKeyRangeRequest(string? partitionKeyRangeId, bool throttled, double requestCharge)
     {
         lock (_sync)
         {
@@ -264,6 +269,18 @@ public sealed class WorkerMetrics
 
             _partitionKeyRangeRequestCounts.TryGetValue(partitionKeyRangeId, out long current);
             _partitionKeyRangeRequestCounts[partitionKeyRangeId] = current + 1;
+
+            if (throttled)
+            {
+                _partitionKeyRangeThrottleCounts.TryGetValue(partitionKeyRangeId, out long throttles);
+                _partitionKeyRangeThrottleCounts[partitionKeyRangeId] = throttles + 1;
+            }
+
+            if (requestCharge > 0)
+            {
+                _partitionKeyRangeRuTotals.TryGetValue(partitionKeyRangeId, out double ru);
+                _partitionKeyRangeRuTotals[partitionKeyRangeId] = ru + requestCharge;
+            }
         }
     }
 
@@ -451,6 +468,9 @@ public sealed class WorkerMetrics
                 RequestChargeTotal = _requestChargeTotal,
                 RequestChargeObservations = _requestChargeObservations,
                 PartitionKeyRangeRequestsPerSec = new Dictionary<string, double>(_partitionKeyRangeRequestsPerSec),
+                PartitionKeyRangeRequestTotals = new Dictionary<string, long>(_partitionKeyRangeRequestCounts),
+                PartitionKeyRangeThrottleTotals = new Dictionary<string, long>(_partitionKeyRangeThrottleCounts),
+                PartitionKeyRangeRuTotals = new Dictionary<string, double>(_partitionKeyRangeRuTotals),
                 PartitionKeyRangeMissingHeaderCount = _partitionKeyRangeMissingHeaderCount,
             };
         }
